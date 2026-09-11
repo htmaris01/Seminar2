@@ -224,8 +224,8 @@ BASE_STOPWORDS = {
     "ve",
     "y",
 }
-STOPWORDS = BASE_STOPWORDS - KEEP_WORDS
-
+STOPWORDS = BASE_STOPWORDS - KEEP_WORDS 
+# not any word in both BASE_STOPWORDS and KEEP_WORDS, so actually STOPWORDS = BASE_STOPWORDS ?
 LEET_MAP = str.maketrans(
     {
         "@": "a",

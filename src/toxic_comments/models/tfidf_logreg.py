@@ -9,13 +9,6 @@ from sklearn.multiclass import OneVsRestClassifier
 from sklearn.multioutput import MultiOutputClassifier
 from sklearn.pipeline import Pipeline
 
-
-def build_dummy_baseline() -> MultiOutputClassifier:
-    """Return a simple baseline that predicts the most frequent class."""
-
-    return MultiOutputClassifier(DummyClassifier(strategy="most_frequent"))
-
-
 def build_tfidf_logistic_regression(
     max_features: int = 50_000,
     ngram_range: tuple[int, int] = (1, 2),

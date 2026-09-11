@@ -15,7 +15,6 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import KFold
 
 from toxic_comments.config import LABEL_COLUMNS, TEXT_COLUMN
 
@@ -66,15 +65,26 @@ def cross_validate_model(
     n_splits: int = 5,
     random_state: int = 42,
     text_column: str = TEXT_COLUMN,
+    splits: list[tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> pd.DataFrame:
     """Run k-fold cross validation and return fold-level metrics."""
 
-    splitter = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    if splits is None:
+        from toxic_comments.folds import make_fold_splits
+
+        splits = make_fold_splits(
+            data,
+            n_splits=n_splits,
+            random_state=random_state,
+            text_column=text_column,
+            strategy="kfold",
+        )
+
     x = data[text_column]
     y = data[LABEL_COLUMNS].to_numpy()
     results: list[FoldResult] = []
 
-    for fold_index, (train_index, test_index) in enumerate(splitter.split(x), start=1):
+    for fold_index, (train_index, test_index) in enumerate(splits, start=1):
         fold_estimator = clone(estimator)
         fold_estimator.fit(x.iloc[train_index], y[train_index])
 

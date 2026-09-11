@@ -6,6 +6,7 @@ __pycache__/
 
 # data/raw/*
 data/processed/*
+data/k_fold/*
 !data/README.md
 
 models/*

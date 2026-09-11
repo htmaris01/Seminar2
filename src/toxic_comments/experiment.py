@@ -8,9 +8,10 @@ import pandas as pd
 
 from toxic_comments.config import HEAVY_TEXT_COLUMN
 from toxic_comments.evaluation import cross_validate_model, summarize_results
-from toxic_comments.models import build_dummy_baseline, build_tfidf_logistic_regression
+from toxic_comments.folds import make_kfold_splits
 from toxic_comments.cleaning import process_cleaning
 from toxic_comments.repositories import DatasetRepository, validate_training_data
+from toxic_comments.models.registry import build_models
 
 
 def run_experiment(
@@ -29,10 +30,8 @@ def run_experiment(
     data = data[data["is_empty_heavy"] == 0].reset_index(drop=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    models = {
-        "dummy_most_frequent": build_dummy_baseline(),
-        "tfidf_logistic_regression": build_tfidf_logistic_regression(max_features=max_features),
-    }
+    models = build_models(max_features=max_features)
+    splits = make_kfold_splits(data, n_splits=n_splits, text_column=HEAVY_TEXT_COLUMN)
 
     fold_results = pd.concat(
         [
@@ -42,6 +41,7 @@ def run_experiment(
                 model_name=name,
                 n_splits=n_splits,
                 text_column=HEAVY_TEXT_COLUMN,
+                splits=splits,
             )
             for name, model in models.items()
         ],
