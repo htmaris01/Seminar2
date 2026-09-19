@@ -20,7 +20,6 @@ def run_experiment(
     n_splits: int = 5,
     max_features: int = 50_000,
     include_transformer_models: bool = False,
-    device: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run baseline and ML classifier evaluation with a repository abstraction.
 
@@ -44,7 +43,6 @@ def run_experiment(
     models = build_models(
         max_features=max_features,
         include_transformer_models=include_transformer_models,
-        device=device,
     )
     splits = make_kfold_splits(data, n_splits=n_splits, text_column=HEAVY_TEXT_COLUMN)
 
@@ -86,4 +84,3 @@ def run_experiment(
     summary = summarize_results(fold_results)
     summary.to_csv(summary_path)
     return fold_results, summary
-

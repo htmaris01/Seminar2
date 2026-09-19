@@ -36,51 +36,11 @@ def parse_args() -> argparse.Namespace:
             "this is set."
         ),
     )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default=None,
-        choices=["cuda", "cpu"],
-        help=(
-            "Force the transformer models onto this device. Default (unset) "
-            "auto-detects GPU vs CPU. Pass --device cuda to fail fast if no "
-            "GPU is actually available, instead of silently falling back to "
-            "a very slow CPU run."
-        ),
-    )
     return parser.parse_args()
-
-
-def _print_device_status(requested_device: str | None) -> None:
-    """Print which device the transformer models will actually run on.
-
-    Mirrors the GPU-check cell in
-    notebooks/train_and_save_roberta_label_dependency.ipynb, so this is
-    visible in the terminal too instead of only happening silently inside
-    ``_roberta_base.RobertaMultiLabelBase.fit``.
-    """
-
-    import torch
-
-    if requested_device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError(
-            "--device cuda was requested but torch.cuda.is_available() is "
-            "False — no GPU visible in this environment. Fix the GPU setup "
-            "(or drop --device to fall back to CPU) before running."
-        )
-
-    device = requested_device or ("cuda" if torch.cuda.is_available() else "cpu")
-    if device == "cuda":
-        print(f"✅ Dùng GPU: {torch.cuda.get_device_name(0)}")
-    else:
-        print("⚠️  KHÔNG CÓ GPU — đang chạy CPU, sẽ rất chậm cho model transformer.")
 
 
 def main() -> None:
     args = parse_args()
-    if args.include_transformers:
-        _print_device_status(args.device)
-
     repository = CsvFileDatasetRepository(args.data)
     fold_results, summary = run_experiment(
         repository=repository,
@@ -88,9 +48,7 @@ def main() -> None:
         n_splits=args.folds,
         max_features=args.max_features,
         include_transformer_models=args.include_transformers,
-        device=args.device,
     )
     print(f"Saved fold metrics: {args.output / 'cross_validation_results.csv'}")
     print(f"Saved summary metrics: {args.output / 'summary_results.csv'}")
     print(summary)
-

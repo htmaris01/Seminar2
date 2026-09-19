@@ -22,4 +22,3 @@ dev = ["pytest>=7.4", "jupyterlab>=4.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

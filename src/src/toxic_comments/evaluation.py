@@ -171,4 +171,3 @@ def _predict_scores(estimator, x_test: pd.Series) -> np.ndarray | None:
 
 def _optional_float(value: float | None) -> float | None:
     return None if value is None else float(value)
-
