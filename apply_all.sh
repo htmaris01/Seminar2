@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Chạy script này TỪ THƯ MỤC GỐC repo (nơi có pyproject.toml), vd: ~/Seminar2
-# Ghi đè trực tiếp toàn bộ file đã sửa: Method 3 + fix tiến độ/incremental-save + save/load model + GPU check (CLI và notebook).
 set -e
 
 mkdir -p src/toxic_comments/models tests notebooks
@@ -13,7 +12,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from toxic_comments.config import RAW_DATA_DIR, RESULTS_DIR
+from toxic_comments.config import PROCESSED_DATA_DIR, RESULTS_DIR
 from toxic_comments.experiment import run_experiment
 from toxic_comments.repositories import CsvFileDatasetRepository
 
@@ -23,8 +22,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data",
         type=Path,
-        default=RAW_DATA_DIR / "train.csv",
-        help="Path to the Kaggle train.csv file.",
+        default=PROCESSED_DATA_DIR / "train_clean.csv",
+        help=(
+            "Path to the training CSV. Can be the raw Kaggle train.csv, or an "
+            "already-cleaned file (with comment_heavy/is_empty_heavy columns, "
+            "like data/processed/train_clean.csv) — cleaning is auto-skipped "
+            "when those columns are already present."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -56,6 +60,18 @@ def parse_args() -> argparse.Namespace:
             "a very slow CPU run."
         ),
     )
+    parser.add_argument(
+        "--no-save-models",
+        dest="save_models",
+        action="store_false",
+        help=(
+            "Don't save the last fold's fitted transformer model after "
+            "training (saved to models/<name>/ by default when "
+            "--include-transformers is set — useful for quick sanity-check "
+            "runs where you don't want to overwrite the real saved model)."
+        ),
+    )
+    parser.set_defaults(save_models=True)
     return parser.parse_args()
 
 
@@ -97,6 +113,7 @@ def main() -> None:
         max_features=args.max_features,
         include_transformer_models=args.include_transformers,
         device=args.device,
+        save_transformer_models=args.save_models,
     )
     print(f"Saved fold metrics: {args.output / 'cross_validation_results.csv'}")
     print(f"Saved summary metrics: {args.output / 'summary_results.csv'}")
@@ -113,12 +130,29 @@ from pathlib import Path
 
 import pandas as pd
 
-from toxic_comments.config import HEAVY_TEXT_COLUMN
+from toxic_comments.config import HEAVY_TEXT_COLUMN, MODELS_DIR
 from toxic_comments.evaluation import cross_validate_model, summarize_results
 from toxic_comments.folds import make_kfold_splits
 from toxic_comments.cleaning import process_cleaning
 from toxic_comments.repositories import DatasetRepository, validate_training_data
 from toxic_comments.models.registry import build_models
+
+# Columns process_cleaning() adds — if the loaded file already has them
+# (e.g. a pre-cleaned file like data/processed/train_clean.csv), cleaning is
+# skipped instead of redone, since it's already exactly that output.
+_CLEANED_MARKER_COLUMNS = {HEAVY_TEXT_COLUMN, "is_empty_heavy"}
+
+
+def _load_and_prepare_data(repository: DatasetRepository) -> pd.DataFrame:
+    data = validate_training_data(repository.load())
+    if _CLEANED_MARKER_COLUMNS.issubset(data.columns):
+        print(
+            f"Data đã có sẵn cột {HEAVY_TEXT_COLUMN!r} — bỏ qua process_cleaning(), "
+            "dùng thẳng file đã clean."
+        )
+    else:
+        data = process_cleaning(data, is_train=True, verbose=False)
+    return data[data["is_empty_heavy"] == 0].reset_index(drop=True)
 
 
 def run_experiment(
@@ -128,6 +162,7 @@ def run_experiment(
     max_features: int = 50_000,
     include_transformer_models: bool = False,
     device: str | None = None,
+    save_transformer_models: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run baseline and ML classifier evaluation with a repository abstraction.
 
@@ -138,14 +173,17 @@ def run_experiment(
     now be inspected mid-run (e.g. with the ``view_experiment_results``
     notebook) and, if it crashes or is interrupted, the folds/models that
     already finished are not lost.
+
+    ``cross_validate_model`` clones + fits + discards a model per fold, by
+    design, since the point of CV is comparing methods, not producing a
+    deployable artifact. But when ``save_transformer_models`` is True
+    (default), the LAST fold's fitted transformer model is kept and saved to
+    ``models/<model_name>/`` via its ``.save()`` — so a normal CLI/CV run
+    also leaves behind a model usable for inference (see ``predict.py``),
+    without needing a second, separate training pass just for that.
     """
 
-    data = process_cleaning(
-        validate_training_data(repository.load()),
-        is_train=True,
-        verbose=False,
-    )
-    data = data[data["is_empty_heavy"] == 0].reset_index(drop=True)
+    data = _load_and_prepare_data(repository)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     models = build_models(
@@ -178,6 +216,12 @@ def run_experiment(
         summarize_results(so_far).to_csv(summary_path)
 
     for name, model in models.items():
+        last_fitted = {}
+
+        def _on_fold_complete(result, fold_estimator, _last_fitted=last_fitted) -> None:
+            _persist_fold(result)
+            _last_fitted["estimator"] = fold_estimator
+
         model_fold_results = cross_validate_model(
             model,
             data,
@@ -185,9 +229,18 @@ def run_experiment(
             n_splits=n_splits,
             text_column=HEAVY_TEXT_COLUMN,
             splits=splits,
-            on_fold_complete=_persist_fold,
+            on_fold_complete=_on_fold_complete,
         )
         all_results.append(model_fold_results)
+
+        fitted = last_fitted.get("estimator")
+        if save_transformer_models and fitted is not None and hasattr(fitted, "save"):
+            save_path = MODELS_DIR / name
+            fitted.save(save_path)
+            print(
+                f"Đã lưu model '{name}' (fold cuối) tại {save_path} — "
+                f"dùng `python -m toxic_comments.predict --model {save_path}` để infer."
+            )
 
     fold_results = pd.concat(all_results, ignore_index=True)
     summary = summarize_results(fold_results)
@@ -267,15 +320,17 @@ def cross_validate_model(
     random_state: int = 42,
     text_column: str = TEXT_COLUMN,
     splits: list[tuple[np.ndarray, np.ndarray]] | None = None,
-    on_fold_complete: Callable[[FoldResult], None] | None = None,
+    on_fold_complete: Callable[[FoldResult, object], None] | None = None,
 ) -> pd.DataFrame:
     """Run k-fold cross validation and return fold-level metrics.
 
     Prints per-fold progress (with elapsed time) so a slow model — e.g. a
     RoBERTa fine-tune — doesn't look frozen. If ``on_fold_complete`` is
-    given, it's called with each ``FoldResult`` right after that fold
-    finishes, so callers (see ``experiment.run_experiment``) can persist
-    results incrementally instead of only at the very end.
+    given, it's called after each fold finishes as
+    ``on_fold_complete(result, fold_estimator)`` — the fitted estimator for
+    that fold is included (not just its metrics) so callers can persist it
+    (see ``experiment.run_experiment`` saving the last fold's transformer
+    model for later inference), not only the metrics.
     """
 
     if splits is None:
@@ -321,7 +376,7 @@ def cross_validate_model(
         )
 
         if on_fold_complete is not None:
-            on_fold_complete(result)
+            on_fold_complete(result, fold_estimator)
 
         results.append(result)
 
@@ -370,6 +425,105 @@ def _predict_scores(estimator, x_test: pd.Series) -> np.ndarray | None:
 
 def _optional_float(value: float | None) -> float | None:
     return None if value is None else float(value)
+
+FILE_EOF
+
+cat > src/toxic_comments/predict.py << 'FILE_EOF'
+"""Run inference with a saved toxic-comment classifier.
+
+Loads a model saved via ``RobertaMultiLabelBase.save()`` — either the
+automatic last-fold save from ``python -m toxic_comments --include-transformers``
+(see ``experiment.run_experiment``), or a model saved from
+``notebooks/train_and_save_roberta_label_dependency.ipynb`` — and predicts on
+new comment text.
+
+Usage
+-----
+    python -m toxic_comments.predict --text "you are so stupid" --text "have a nice day"
+    python -m toxic_comments.predict --model models/roberta_label_dependency --text "..."
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import pandas as pd
+
+from toxic_comments.cleaning import clean_heavy, clean_light
+from toxic_comments.config import LABEL_COLUMNS, MODELS_DIR
+from toxic_comments.models.roberta_label_dependency import RobertaLabelDependencyClassifier
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Classify comment text with a saved model")
+    parser.add_argument(
+        "--model",
+        type=Path,
+        default=MODELS_DIR / "roberta_label_dependency",
+        help="Directory a model was saved to via .save() (default: models/roberta_label_dependency).",
+    )
+    parser.add_argument(
+        "--text",
+        type=str,
+        action="append",
+        required=True,
+        help="Comment text to classify. Repeat --text for multiple comments.",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.5,
+        help="Decision threshold applied to every label (default 0.5 — see the "
+        "research design's note on per-label adaptive thresholds for why this "
+        "is a simplification).",
+    )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Treat --text as already-cleaned text and skip clean_light/clean_heavy "
+        "(the model was trained on cleaned text, so leave this off for normal use).",
+    )
+    return parser.parse_args()
+
+
+def predict(texts: list[str], model_dir: Path, threshold: float = 0.5, already_clean: bool = False) -> pd.DataFrame:
+    """Load a saved model and return a per-label probability/prediction table."""
+
+    model = RobertaLabelDependencyClassifier.load(model_dir)
+
+    if already_clean:
+        cleaned = pd.Series(texts)
+    else:
+        cleaned = pd.Series(texts).apply(clean_light).apply(clean_heavy)
+
+    scores = model.predict_proba(cleaned)
+    preds = (scores >= threshold).astype(int)
+
+    result = pd.DataFrame({"comment_text": texts})
+    for i, label in enumerate(LABEL_COLUMNS):
+        result[f"{label}_prob"] = scores[:, i].round(4)
+        result[f"{label}_pred"] = preds[:, i]
+    return result
+
+
+def main() -> None:
+    args = parse_args()
+    if not (args.model / "params.json").exists():
+        raise FileNotFoundError(
+            f"Không thấy model đã lưu tại {args.model} (thiếu params.json). "
+            "Model chỉ được lưu khi chạy `--include-transformers` (mặc định "
+            "auto-save fold cuối) hoặc qua notebook train_and_save_*.ipynb."
+        )
+
+    result = predict(args.text, args.model, threshold=args.threshold, already_clean=args.raw)
+    pd.set_option("display.width", 200)
+    pd.set_option("display.max_colwidth", 40)
+    print(result.to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()
 
 FILE_EOF
 
@@ -448,6 +602,7 @@ Design notes
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -456,6 +611,7 @@ import torch
 from sklearn.base import BaseEstimator, ClassifierMixin
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
+from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
 from toxic_comments.config import LABEL_COLUMNS
@@ -530,12 +686,24 @@ class RobertaMultiLabelBase(BaseEstimator, ClassifierMixin):
         self.tokenizer_ = AutoTokenizer.from_pretrained(self.pretrained_model_name)
         self.model_ = self._build_model(y).to(self.device_)
 
+        # Tokenizing the whole fold in one call has no built-in progress
+        # output and can take a while (CPU-bound) — print around it so a
+        # long pause here doesn't look like a hang.
+        print(f"Đang tokenize {len(X):,} dòng...", flush=True)
+        tokenize_start = time.perf_counter()
         loader = self._make_loader(X, y, shuffle=True)
+        print(f"Tokenize xong sau {time.perf_counter() - tokenize_start:.1f}s — bắt đầu train.", flush=True)
+
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate)
 
         self.model_.train()
-        for _ in range(self.num_epochs):
-            for batch in loader:
+        for epoch in range(self.num_epochs):
+            progress = tqdm(
+                loader,
+                desc=f"Epoch {epoch + 1}/{self.num_epochs}",
+                leave=False,
+            )
+            for batch in progress:
                 targets = batch.pop("labels").to(self.device_)
                 batch = {key: value.to(self.device_) for key, value in batch.items()}
 
@@ -544,6 +712,7 @@ class RobertaMultiLabelBase(BaseEstimator, ClassifierMixin):
                 loss = self._compute_loss(logits, targets)
                 loss.backward()
                 optimizer.step()
+                progress.set_postfix(loss=f"{loss.item():.4f}")
         return self
 
     def predict_proba(self, X: pd.Series) -> np.ndarray:
@@ -912,6 +1081,7 @@ seaborn>=0.13
 pytest>=7.4
 torch>=2.1
 transformers>=4.38
+tqdm>=4.66
 
 FILE_EOF
 
@@ -933,6 +1103,7 @@ dependencies = [
     "seaborn>=0.13",
     "torch>=2.1",
     "transformers>=4.38",
+    "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
@@ -1209,6 +1380,7 @@ cat > notebooks/train_and_save_roberta_label_dependency.ipynb << 'FILE_EOF'
     "from toxic_comments.folds import make_kfold_splits\n",
     "from toxic_comments.evaluation import evaluate_predictions\n",
     "from toxic_comments.models.roberta_label_dependency import build_roberta_label_dependency\n",
+    "from toxic_comments.predict import predict\n",
     "\n",
     "print(\"PROJECT_ROOT =\", PROJECT_ROOT)\n",
     "print(\"SRC_DIR exists:\", SRC_DIR.exists())"
@@ -1339,9 +1511,11 @@ cat > notebooks/train_and_save_roberta_label_dependency.ipynb << 'FILE_EOF'
    "cell_type": "markdown",
    "metadata": {},
    "source": [
-    "## 5. Load lại từ đĩa (kiểm chứng save/load đúng) + Evaluate trên test set\n",
+    "## 5. Evaluate qua `predict.py` (gọi hàm infer thật, không load thủ công)\n",
     "\n",
-    "Không dùng lại biến `model` ở bước 3 — cố tình load lại từ đĩa bằng `RobertaLabelDependencyClassifier.load(...)` để chắc chắn phần lưu/load hoạt động thật, không phải chỉ đang evaluate model còn nằm trong RAM."
+    "Dùng thẳng hàm `predict()` trong `toxic_comments/predict.py` — đúng con đường sẽ dùng khi infer thật (CLI `python -m toxic_comments.predict ...` cũng gọi hàm này) — thay vì tự `RobertaLabelDependencyClassifier.load()` + `predict_proba()` thủ công trong notebook. Vừa evaluate được, vừa tự kiểm chứng luôn `predict.py` hoạt động đúng trên model vừa lưu.\n",
+    "\n",
+    "`already_clean=True` vì `X_test` ở đây đã là `comment_heavy` (đã qua `clean_light`/`clean_heavy` từ bước 1) — để `predict()` khỏi clean lại lần nữa."
    ]
   },
   {
@@ -1350,15 +1524,20 @@ cat > notebooks/train_and_save_roberta_label_dependency.ipynb << 'FILE_EOF'
    "metadata": {},
    "outputs": [],
    "source": [
-    "from toxic_comments.models.roberta_label_dependency import RobertaLabelDependencyClassifier\n",
+    "result_df = predict(\n",
+    "    list(X_test),\n",
+    "    model_dir=save_path,\n",
+    "    threshold=0.5,\n",
+    "    already_clean=True,  # X_test đã là comment_heavy rồi, khỏi clean lại\n",
+    ")\n",
     "\n",
-    "loaded_model = RobertaLabelDependencyClassifier.load(save_path)\n",
-    "\n",
-    "y_pred = loaded_model.predict(X_test)\n",
-    "y_score = loaded_model.predict_proba(X_test)\n",
+    "pred_cols = [f\"{label}_pred\" for label in LABEL_COLUMNS]\n",
+    "prob_cols = [f\"{label}_prob\" for label in LABEL_COLUMNS]\n",
+    "y_pred = result_df[pred_cols].to_numpy()\n",
+    "y_score = result_df[prob_cols].to_numpy()\n",
     "\n",
     "metrics = evaluate_predictions(y_test, y_pred, y_score)\n",
-    "pd.Series(metrics, name=\"roberta_label_dependency (fold 1 test set)\")"
+    "pd.Series(metrics, name=\"roberta_label_dependency (fold 1 test set, qua predict.py)\")"
    ]
   },
   {
@@ -1397,12 +1576,20 @@ cat > notebooks/train_and_save_roberta_label_dependency.ipynb << 'FILE_EOF'
    "source": [
     "## Dùng lại model đã lưu ở lần chạy sau (không cần train lại)\n",
     "\n",
+    "**Trong code/notebook khác:**\n",
     "```python\n",
-    "from toxic_comments.models.roberta_label_dependency import RobertaLabelDependencyClassifier\n",
+    "from toxic_comments.predict import predict\n",
     "from toxic_comments.config import MODELS_DIR\n",
     "\n",
-    "model = RobertaLabelDependencyClassifier.load(MODELS_DIR / \"roberta_label_dependency\")\n",
-    "model.predict_proba([\"some comment text here\"])\n",
+    "result_df = predict(\n",
+    "    [\"some comment text here\"],\n",
+    "    model_dir=MODELS_DIR / \"roberta_label_dependency\",\n",
+    ")  # already_clean=False (mặc định) vì đây là text thô, chưa qua clean_light/clean_heavy\n",
+    "```\n",
+    "\n",
+    "**Ngoài terminal:**\n",
+    "```\n",
+    "python -m toxic_comments.predict --text \"some comment text here\"\n",
     "```"
    ]
   }

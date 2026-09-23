@@ -31,6 +31,7 @@ Design notes
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +40,7 @@ import torch
 from sklearn.base import BaseEstimator, ClassifierMixin
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
+from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
 from toxic_comments.config import LABEL_COLUMNS
@@ -113,12 +115,24 @@ class RobertaMultiLabelBase(BaseEstimator, ClassifierMixin):
         self.tokenizer_ = AutoTokenizer.from_pretrained(self.pretrained_model_name)
         self.model_ = self._build_model(y).to(self.device_)
 
+        # Tokenizing the whole fold in one call has no built-in progress
+        # output and can take a while (CPU-bound) — print around it so a
+        # long pause here doesn't look like a hang.
+        print(f"Đang tokenize {len(X):,} dòng...", flush=True)
+        tokenize_start = time.perf_counter()
         loader = self._make_loader(X, y, shuffle=True)
+        print(f"Tokenize xong sau {time.perf_counter() - tokenize_start:.1f}s — bắt đầu train.", flush=True)
+
         optimizer = torch.optim.AdamW(self.model_.parameters(), lr=self.learning_rate)
 
         self.model_.train()
-        for _ in range(self.num_epochs):
-            for batch in loader:
+        for epoch in range(self.num_epochs):
+            progress = tqdm(
+                loader,
+                desc=f"Epoch {epoch + 1}/{self.num_epochs}",
+                leave=False,
+            )
+            for batch in progress:
                 targets = batch.pop("labels").to(self.device_)
                 batch = {key: value.to(self.device_) for key, value in batch.items()}
 
@@ -127,6 +141,7 @@ class RobertaMultiLabelBase(BaseEstimator, ClassifierMixin):
                 loss = self._compute_loss(logits, targets)
                 loss.backward()
                 optimizer.step()
+                progress.set_postfix(loss=f"{loss.item():.4f}")
         return self
 
     def predict_proba(self, X: pd.Series) -> np.ndarray:

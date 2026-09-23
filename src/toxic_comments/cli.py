@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from toxic_comments.config import RAW_DATA_DIR, RESULTS_DIR
+from toxic_comments.config import PROCESSED_DATA_DIR, RESULTS_DIR
 from toxic_comments.experiment import run_experiment
 from toxic_comments.repositories import CsvFileDatasetRepository
 
@@ -15,8 +15,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data",
         type=Path,
-        default=RAW_DATA_DIR / "train.csv",
-        help="Path to the Kaggle train.csv file.",
+        default=PROCESSED_DATA_DIR / "train_clean.csv",
+        help=(
+            "Path to the training CSV. Can be the raw Kaggle train.csv, or an "
+            "already-cleaned file (with comment_heavy/is_empty_heavy columns, "
+            "like data/processed/train_clean.csv) — cleaning is auto-skipped "
+            "when those columns are already present."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -48,6 +53,18 @@ def parse_args() -> argparse.Namespace:
             "a very slow CPU run."
         ),
     )
+    parser.add_argument(
+        "--no-save-models",
+        dest="save_models",
+        action="store_false",
+        help=(
+            "Don't save the last fold's fitted transformer model after "
+            "training (saved to models/<name>/ by default when "
+            "--include-transformers is set — useful for quick sanity-check "
+            "runs where you don't want to overwrite the real saved model)."
+        ),
+    )
+    parser.set_defaults(save_models=True)
     return parser.parse_args()
 
 
@@ -89,6 +106,7 @@ def main() -> None:
         max_features=args.max_features,
         include_transformer_models=args.include_transformers,
         device=args.device,
+        save_transformer_models=args.save_models,
     )
     print(f"Saved fold metrics: {args.output / 'cross_validation_results.csv'}")
     print(f"Saved summary metrics: {args.output / 'summary_results.csv'}")

@@ -68,15 +68,17 @@ def cross_validate_model(
     random_state: int = 42,
     text_column: str = TEXT_COLUMN,
     splits: list[tuple[np.ndarray, np.ndarray]] | None = None,
-    on_fold_complete: Callable[[FoldResult], None] | None = None,
+    on_fold_complete: Callable[[FoldResult, object], None] | None = None,
 ) -> pd.DataFrame:
     """Run k-fold cross validation and return fold-level metrics.
 
     Prints per-fold progress (with elapsed time) so a slow model — e.g. a
     RoBERTa fine-tune — doesn't look frozen. If ``on_fold_complete`` is
-    given, it's called with each ``FoldResult`` right after that fold
-    finishes, so callers (see ``experiment.run_experiment``) can persist
-    results incrementally instead of only at the very end.
+    given, it's called after each fold finishes as
+    ``on_fold_complete(result, fold_estimator)`` — the fitted estimator for
+    that fold is included (not just its metrics) so callers can persist it
+    (see ``experiment.run_experiment`` saving the last fold's transformer
+    model for later inference), not only the metrics.
     """
 
     if splits is None:
@@ -122,7 +124,7 @@ def cross_validate_model(
         )
 
         if on_fold_complete is not None:
-            on_fold_complete(result)
+            on_fold_complete(result, fold_estimator)
 
         results.append(result)
 

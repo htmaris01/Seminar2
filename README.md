@@ -32,6 +32,7 @@ tests/                 # unit tests
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+python -m toxic_comments --include-transformers --folds 5
 ```
 
 Download the dataset from Kaggle and put `train.csv` at:
